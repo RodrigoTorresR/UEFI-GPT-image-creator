@@ -15,7 +15,7 @@ typedef struct{
 	uint8_t		clock_seq_hi_and_res;	//Hihest bits are varian #				 
 	uint8_t		clock_seq_lo;		
 	uint8_t		node[6];	
-}__attribute__((packed)) Guid;
+} __attribute__ ((packed)) Guid;
 typedef struct{	
 	uint8_t boot_indicator;
 	uint8_t starting_chs[3];
@@ -23,7 +23,7 @@ typedef struct{
 	uint8_t ending_chs[3];
 	uint32_t starting_lba;
 	uint32_t size_lba;
-} __attribute__((packed)) Mbr_Partition;
+} __attribute__ ((packed)) Mbr_Partition;
 	
 //Master Boot Record
 typedef struct{
@@ -32,7 +32,7 @@ typedef struct{
 	uint16_t unknown;
 	Mbr_Partition partition [4];
 	uint16_t boot_signature;
-} __attribute__((packed)) Mbr;
+} __attribute__ ((packed)) Mbr;
 //GPT header
 typedef struct{
 	uint8_t 	signature[8];
@@ -51,7 +51,7 @@ typedef struct{
 	uint32_t	partition_table_crc32;
 
 	uint8_t		reserved_2[512-92];
-}__attribute__((packed)) Gpt_Header;
+} __attribute__ ((packed)) Gpt_Header;
 
 //GPT Partition Entrry
 typedef struct {
@@ -61,7 +61,50 @@ typedef struct {
 	uint64_t ending_lba;
 	uint64_t attributes;
 	char16_t name[36]; //UCS-2 (UUTF-16 LIMITED TO CODE POINTS 0X0000 - 0Xffff)
-}__attribute__((packed)) Gpt_Partition_Entry;
+} __attribute__ ((packed)) Gpt_Partition_Entry;
+//FAT32 Volume boot record (VBR)
+typedef struct{
+	uint8_t	BS_jmpBoot[3];
+	uint8_t	BS_OEMName[8];
+	uint16_t BPB_BytesPerSec;
+	uint8_t	 BPB_SecPerclus;
+	uint16_t BPB_RsvdSecCnt;
+	uint8_t BPB_NumFATs;
+	uint16_t BPB_RootEntCnt;
+	uint16_t BPB_TotSec16;
+	uint8_t BPB_Media;
+	uint16_t BPB_FATSz16;
+	uint16_t BPB_SecPerTrk;
+	uint16_t BPB_NumHeads;
+	uint32_t BPB_HiddSec;
+	uint32_t BPB_TotSec32;
+	uint32_t BPB_FATSz32;
+	uint16_t BPB_ExtFlags;
+	uint16_t BPB_FSVer;
+	uint32_t BPB_RootClus;
+	uint16_t BPB_FSInfo;
+	uint16_t BPB_BkBootSec;
+	uint8_t  BPB_Reserved[12];
+	uint8_t  BS_DrvNum;
+	uint8_t  BS_Reserved1;
+	uint8_t  BS_BootSig;
+	uint8_t  BS_VolID[4];
+	uint8_t  BS_VolLab[11];
+	uint8_t  BS_FilSysType[8];
+	//Not in fatgen103.doc tables
+	uint8_t	 boot_code[510-90];
+	uint16_t bootsec_sig;	//0xAS55
+} __attribute__ ((packed)) Vbr;
+//FAT32 file system Info Sector
+typedef struct{
+	uint32_t FSI_LeadSig;
+	uint8_t  FSI_Reserved1[480];
+	uint32_t FSI_StructSig;
+	uint32_t FSI_Free_Count;
+	uint32_t FSI_Next_Free;
+	uint8_t  FSI_Reserved2[212];
+	uint32_t FSI_TrailSig;
+} __attribute__ ((packed)) FSInfo;
 //i----------------------------------
 //Globa constanst, enumbk 
 //i----------------------------------
@@ -85,7 +128,8 @@ uint64_t lba_size = 512;
 uint64_t esp_size = 1024*1024*33;	// 33 MiB
 uint64_t data_size = 1024*1024*1;	// 1 MiB
 uint64_t image_size = 0;
-uint64_t esp_size_lbas = 0, data_size_lbas = 0, image_size_lbas = 0; //Sizes in LBA
+uint64_t esp_size_lbas = 0, data_size_lbas = 0, image_size_lbas = 0,  //Sizes in LBA
+	gpt_table_lbas = 0;								      //
 uint64_t align_lba = 0, esp_lba = 0, data_lba = 0; //Starting lba value of
 //==================================
 //convert bytes to LBAs
@@ -219,8 +263,8 @@ bool write_gpts(FILE *image){
 		.reserved_1 = 0,
 		.my_lba = 1,		//lba 1 is right after MBR
 		.alternate_lba = image_size_lbas - 1,
-		.first_usable_lba = 1 + 1 +32, //mbr + gpt + Primayr gpt table
-		.last_usable_lba = image_size_lbas -1 -32 -1, //2nd GPT header, table
+		.first_usable_lba = 1 + 1 + gpt_table_lbas, //mbr + gpt + Primayr gpt table
+		.last_usable_lba = image_size_lbas -1 -gpt_table_lbas - 1, //2nd GPT header, table
 		.disk_guid = new_guid(), 
 		.partition_table_lba = 2, //After MBR + GPT header
 		.number_of_entries = 128,
@@ -269,7 +313,7 @@ bool write_gpts(FILE *image){
 	secondary_gpt.partition_table_crc32 =0;
 	secondary_gpt.my_lba = primary_gpt.alternate_lba;
 	secondary_gpt.alternate_lba = primary_gpt.my_lba;
-	secondary_gpt.partition_table_lba = image_size_lbas - 1 -32;
+	secondary_gpt.partition_table_lba = image_size_lbas -1 - gpt_table_lbas;
 
 	//FFill out secondary  CRC values
 	secondary_gpt.partition_table_crc32 = calculate_crc32(gpt_table, sizeof gpt_table);
@@ -287,6 +331,99 @@ bool write_gpts(FILE *image){
 
 	return true;
 }
+//=====================================
+//Write GPT system parttition (ESP) /with FAT32 filesystem
+//====================================
+bool write_esp(FILE *image){
+	//Reserver sector region  ..................
+	//TODO: Fillout Volume Boot Record (VBR)
+	const uint8_t reserved_sectors = 32; //FAT32
+	Vbr vbr = {
+		.BS_jmpBoot = { 0xEB, 0x00, 0x90},
+ 		.BS_OEMName = { "THIS DISK" },
+ 		.BPB_BytesPerSec = lba_size, //This is limited to only 512/1024/2048/4096
+	 	.BPB_SecPerclus = 1,
+ 		.BPB_RsvdSecCnt = reserved_sectors,
+		.BPB_NumFATs = 2,
+		.BPB_RootEntCnt = 0,
+		.BPB_TotSec16 = 0,
+		.BPB_Media = 0xF8, //"Fixed" non -removable media; Couould also be 0xF00 for e.g. flash drive
+		.BPB_FATSz16 = 0,
+		.BPB_SecPerTrk = 0,
+		.BPB_NumHeads = 0,
+		.BPB_HiddSec = esp_lba - 1, //# of sectors before this partition/voume
+		.BPB_TotSec32 = esp_size_lbas, //Size of this partition
+		.BPB_FATSz32 = (align_lba - reserved_sectors) / 2,
+		.BPB_ExtFlags = 0,	//Mirroed FATs
+		.BPB_FSVer = 0,
+		.BPB_RootClus = 2,	//Cluster 0 & 1 are reserved; root dir cluster starts at 2
+		.BPB_FSInfo =1,		//Sector 0 = this VBR; FS Info sector follwsd it
+		.BPB_BkBootSec = 6,
+		.BPB_Reserved = { 0 },	
+		.BS_DrvNum = 0x80,	//First hard drive
+		.BS_Reserved1 = 0,
+		.BS_BootSig = 0x29, 
+		.BS_VolID = { 0 },
+		.BS_VolLab = { "NO NAME   " }, //no bolume label
+		.BS_FilSysType = { "FAT32    "}, //k
+		//Not in fatgen103.doc tables
+	 	.boot_code = { 0 },
+		.bootsec_sig = 0xAA55, 	//0xAS55
+	};	
+	//TODO: Fill out file system info sector
+	FSInfo fsinfo= {
+		.FSI_LeadSig = 0x41615252,
+		.FSI_Reserved1 = { 0 },
+		.FSI_StructSig = 0x61417272,
+		.FSI_Free_Count = 0xFFFFFFFF,
+		.FSI_Next_Free = 0xFFFFFFFF,
+		.FSI_Reserved2 = { 0 },
+		.FSI_TrailSig = 0xAA550000,
+	};
+		
+	//T write VVR and FSInfo
+	fseek(image, esp_lba * lba_size, SEEK_SET);
+	if (!fwrite(&vbr, 1, sizeof vbr, image) != sizeof vbr){
+		fprintf("Error: Could not write ESP VBR to image\n");
+		return false;
+	}
+	write_full_lba_size(image);
+
+	if (!fwrite(&FSInfo, 1, sizeof FSInfo, image) != sizeof FSInfo){
+		fprintf("Error: Could not write ESP File System Info Sector to image\n");
+		return false;
+	}
+	write_full_lba_size(image);
+
+	//Go to  back up boot sector ocation
+	fseek(image, (esp_lba + vbr.BPB_BkBootSec) * lba_size, SEEK_SET);	
+	
+	//TODO: Write VBR and FSInf and backu  locationo
+	fseek(image, esp_lba * lba_size, SEEK_SET);
+	if (!fwrite(&vbr, 1, sizeof vbr, image) != sizeof vbr){
+		fprintf("Error: Could not write VBR to image\n");
+		return false;
+	}
+	write_full_lba_size(image);
+
+	if (!fwrite(&FSInfo, 1, sizeof FSInfo, image) != sizeof FSInfo){
+		fprintf("Error: Could not write ESP File System Info Sector to image\n");
+		return false;
+	}
+	write_full_lba_size(image);
+	
+	//FAT region ----------------------
+	//TODO:Write FATsi (NOTE FATs will be mirrored)
+	fseek(image, (esp_lba + vbr.BPB_RsvdSecCnt) * lba_size , SEEK_SET)
+	for (uint8_t i = 0; i < vbr.BPB_NumFATs; i++) {
+		fseek(image,
+			((esp_lba + vbr.BPB_RsvdSecCnt) + (i*vbr.BPB_FATSz32)) * lba_size, 
+			SEEK_SET);
+
+	}	
+	//TODO: Swrite File Data ..
+	return true;
+}
 
 //=====================================
 //MAIN
@@ -298,7 +435,9 @@ int main(void){
 		return EXIT_FAILURE;
 	}
 	//Set sizes & lbas
-	const uint64_t padding = (ALIGNMENT *2 + (lba_size *67)); //extra padding for GPTs/MBR
+	gpt_table_lbas = GPT_TABLE_SIZE / lba_size;
+
+	const uint64_t padding = (ALIGNMENT *2 + (lba_size * ((gpt_table_lbas * 2) + 1 + 2)) ); //extra padding for GPTs/MBR
 	image_size = esp_size + data_size + padding; // add some extra padding for GPTs /MBR
 	image_size_lbas = bytes_to_lbas(image_size);					
 	align_lba = ALIGNMENT / lba_size;
@@ -322,6 +461,12 @@ int main(void){
 		fprintf(stderr, "Error: coud not write GPT headers & tables for file %s\n", image_name);
 		return EXIT_FAILURE;
 	}	
+	//write EFI SYSTEM PARTITION w/Fat32 filesystem
+	if (!write_esp(image)){
+		fprintf(stderr, "Error: coud not write ESP for file %s\n", image_name);
+		return EXIT_FAILURE;
+	}	
+
 
 	return EXIT_SUCCESS;
 }
