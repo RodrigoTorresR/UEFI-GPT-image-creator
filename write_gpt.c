@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <time.h>
 #include <uchar.h> //u""
+#include <string.h>
 //i----------------------------------
 //Globarl Typedef
 //i----------------------------------
@@ -105,6 +106,33 @@ typedef struct{
 	uint8_t  FSI_Reserved2[212];
 	uint32_t FSI_TrailSig;
 } __attribute__ ((packed)) FSInfo;
+//FAT32 Directory Entry (Short Name)
+ typedef struct {
+	 uint8_t DIR_Name[11];
+	 uint8_t DIR_Attr;
+	 uint8_t DIR_NTRes;
+	 uint8_t DIR_CrtTimeTenth;
+	 uint16_t DIR_CrtTime;
+	 uint16_t DIR_CrtDate;
+	 uint16_t DIR_LstAccDate;
+	 uint16_t DIR_FstClusHI;
+	 uint16_t DIR_WrtTime;
+	 uint16_t DIR_WrtDate;
+	 uint16_t DIR_FstClusL0;
+	 uint32_t DIR_FileSize;
+ } __attribute__ ((packed)) FAT32_Dir_Entry_Short;
+
+//FAT32 Directroy Entry Attributes
+typedef enum {
+	ATTR_READ_ONLY	= 0X01,
+	ATTR_HIDDEN	= 0X02,
+	ATTR_SYSTEM	= 0X04,
+	ATTR_VOLUME_ID	= 0X08,
+	ATTR_DIRECTORY 	= 0X10,
+	ATTR_ARCHIVE	= 0x20,
+	ATRR_LONG_NAME  = ATTR_READ_ONLY | ATTR_HIDDEN |
+			  ATTR_SYSTEM	 | ATTR_VOLUME_ID,
+}FAT3_Dir_Atrr;
 //i----------------------------------
 //Globa constanst, enumbk 
 //i----------------------------------
@@ -220,7 +248,21 @@ uint32_t calculate_crc32(void *buf, int32_t len) {
 	//Invert bits from return value
 	return c^0xFFFFFFFFL;
 }
-
+//================================
+//Get new dat/time values for FAT32 directory entries
+// ===============================
+void get_fat_dir_entry_time_date(uint16_t *in_time, uint16_t *in_date){
+	time_t curr_time;
+	curr_time = time(NULL);
+	struct tm tm = *localtime(time(NULL));
+	
+	//Fat32 needs # of years since 1980, localtime return tm_year as # years since 1900
+	//subtra 80 years for correct year value.Also convert month of year from 0-11 to 1 -12
+	//by adding 1
+	*in_time = ((tm.tm_year - 80) << 9) | ((tm.tm_mon + 1) << 5) | tm.tm_mday;
+	// Seconds is # 2-sexond count, 0-29		
+	*in_date = tm.tm_hour << 11 | tm.tm_min << 5 | (tm.tm_sec / 2);
+}
 
 //================================
 // Write Protective MBR
@@ -383,14 +425,14 @@ bool write_esp(FILE *image){
 		
 	//T write VVR and FSInfo
 	fseek(image, esp_lba * lba_size, SEEK_SET);
-	if (!fwrite(&vbr, 1, sizeof vbr, image) != sizeof vbr){
-		fprintf("Error: Could not write ESP VBR to image\n");
+	if (fwrite(&vbr, 1, sizeof vbr, image) != sizeof vbr){
+		fprintf(stderr, "Error: Could not write ESP VBR to image\n");
 		return false;
 	}
 	write_full_lba_size(image);
 
-	if (!fwrite(&FSInfo, 1, sizeof FSInfo, image) != sizeof FSInfo){
-		fprintf("Error: Could not write ESP File System Info Sector to image\n");
+	if (fwrite(&fsinfo, 1, sizeof fsinfo, image) != sizeof fsinfo){
+		fprintf(stderr, "Error: Could not write ESP File System Info Sector to image\n");
 		return false;
 	}
 	write_full_lba_size(image);
@@ -400,28 +442,113 @@ bool write_esp(FILE *image){
 	
 	//TODO: Write VBR and FSInf and backu  locationo
 	fseek(image, esp_lba * lba_size, SEEK_SET);
-	if (!fwrite(&vbr, 1, sizeof vbr, image) != sizeof vbr){
-		fprintf("Error: Could not write VBR to image\n");
+	if (fwrite(&vbr, 1, sizeof vbr, image) != sizeof vbr){
+		fprintf(stderr, "Error: Could not write VBR to image\n");
 		return false;
 	}
 	write_full_lba_size(image);
 
-	if (!fwrite(&FSInfo, 1, sizeof FSInfo, image) != sizeof FSInfo){
-		fprintf("Error: Could not write ESP File System Info Sector to image\n");
+	if (fwrite(&fsinfo, 1, sizeof fsinfo, image) != sizeof fsinfo){
+		fprintf(stderr, "Error: Could not write ESP File System Info Sector to image\n");
 		return false;
 	}
 	write_full_lba_size(image);
 	
 	//FAT region ----------------------
 	//TODO:Write FATsi (NOTE FATs will be mirrored)
-	fseek(image, (esp_lba + vbr.BPB_RsvdSecCnt) * lba_size , SEEK_SET)
+	//fseek(image, (esp_lba + vbr.BPB_RsvdSecCnt) * lba_size , SEEK_SET)
+	const uint32_t fat_lba = esp_lba + vbr.BPB_RsvdSecCnt;
 	for (uint8_t i = 0; i < vbr.BPB_NumFATs; i++) {
 		fseek(image,
-			((esp_lba + vbr.BPB_RsvdSecCnt) + (i*vbr.BPB_FATSz32)) * lba_size, 
+			(fat_lba + (i*vbr.BPB_FATSz32)) * lba_size, 
 			SEEK_SET);
+		
+		uint32_t cluster = 0;
 
+		// /efi/boot
+		//Cluster 0: FAT identifier, lowest 8 bits are the media type/byte
+		cluster = 0xFFFFFF00 | vbr.BPB_Media;
+		fwrite(&cluster, sizeof cluster, 1, image);
+
+		//Cluset 1; End of chain (EOC) marker
+		cluster = 0xFFFFFFFF;
+		fwrite(&cluster, sizeof cluster, 1, image);
+
+		//Cluster 2; Root dir '/' cluster star, if end of file/dir data then write EOC marker
+		cluster = 0xFFFFFFFF;
+		fwrite(&cluster, sizeof cluster, 1, image);
+
+		//Cluster 3; u ' /EFI DIR CLUSTER
+		cluster = 0xFFFFFFFF;
+		fwrite(&cluster, sizeof cluster, 1, image);
+
+		//Cluster 4; u ' /EFI/BOOT
+		cluster = 0xFFFFFFFF;
+		fwrite(&cluster, sizeof cluster, 1, image);
+
+		//Cluster 5+; Other files/directories...
+		// e. g. if adding a file with a size = 5 sectors/clusters
+		// cluster = 6;	//Point to next cluster containing file data	
+		// cluster = 7;	//Point to next cluster containing file data	
+		// cluster = 8;	//Point to next cluster containing file data	
+		// cluster = 9;	//Point to next cluster containing file data	
+		// cluster = 0xFFFFFFFF;;	ECOC marker, no more file data after this custer	
 	}	
-	//TODO: Swrite File Data ..
+	//Dataregion ...........................
+	//Write File/dir data...................i
+	const uint32_t data_lba = fat_lba + (vbr.BPB_NumFATs * vbr.BPB_FATSz32);
+	fseek(image, data_lba * lba_size, SEEK_SET);
+
+	//TODO: Root ''/' Director
+	//"/EFI" dir entryy
+	FAT32_Dir_Entry_Short dir_ent = {
+		.DIR_Name = { "EFI      " },
+		.DIR_Attr = ATTR_DIRECTORY,
+		.DIR_NTRes = 0,
+		.DIR_CrtTimeTenth = 0,
+		.DIR_CrtDate = 0,
+		.DIR_LstAccDate = 0,
+		.DIR_FstClusHI = 0,
+		.DIR_WrtTime = 0,
+		.DIR_WrtDate = 0,
+		.DIR_FstClusL0 = 3,
+		.DIR_FileSize = 0, //Directories have 0 file size
+	};	
+
+	uint16_t create_time = 0, create_date = 0;
+	get_fat_dir_entry_time_date(&create_time, &create_date);
+
+	dir_ent.DIR_CrtTime = create_time;
+	dir_ent.DIR_CrtDate = create_date;
+	dir_ent.DIR_WrtTime = create_time;
+	dir_ent.DIR_WrtDate = create_date;
+	
+	fwrite(&dir_ent, sizeof dir_ent, 1, image);
+	///EFI Directory entriesy
+	fseek(image, (data_lba + 1) * lba_size, SEEK_SET);
+	
+	memcpy(dir_ent.DIR_Name, ".           ", 11); //"." dir entry, this drectrory itself
+	fwrite(&dir_ent, sizeof dir_ent, 1, image);
+
+	memcpy(dir_ent.DIR_Name, "..          ", 11); //"." dir entry, this is parent dir (ROOT dir)
+	dir_ent.DIR_FstClusL0 = 0;		//Root directory does not have a cluster value
+	fwrite(&dir_ent, sizeof dir_ent, 1, image);
+
+	memcpy(dir_ent.DIR_Name, "BOOT       ", 11); //EI/BOOT boot directory
+	dir_ent.DIR_FstClusL0 = 4;		//EFI/BOOT/ cluster:w
+	fwrite(&dir_ent, sizeof dir_ent, 1, image);
+
+	///EFI/BOOT Directories entries
+	fseek(image, (data_lba + 2) * lba_size, SEEK_SET);
+	
+	memcpy(dir_ent.DIR_Name, ".           ", 11); //"." dir entry, this drectrory itself
+	fwrite(&dir_ent, sizeof dir_ent, 1, image);
+
+	memcpy(dir_ent.DIR_Name, "..          ", 11); //"." dir entry, parent dir (/EFI dir)
+	dir_ent.DIR_FstClusL0 = 3;		// /EFI directory, parent dire
+	fwrite(&dir_ent, sizeof dir_ent, 1, image);
+	
+
 	return true;
 }
 
