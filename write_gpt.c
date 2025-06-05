@@ -158,7 +158,8 @@ uint64_t data_size = 1024*1024*1;	// 1 MiB
 uint64_t image_size = 0;
 uint64_t esp_size_lbas = 0, data_size_lbas = 0, image_size_lbas = 0,  //Sizes in LBA
 	gpt_table_lbas = 0;								      //
-uint64_t align_lba = 0, esp_lba = 0, data_lba = 0; //Starting lba value of
+uint64_t align_lba = 0, esp_lba = 0, data_lba = 0, //Starting lba value of
+	fat32_fats_lba = 0, fat32_data_lba = 0;				
 //==================================
 //convert bytes to LBAs
 //===================================
@@ -551,6 +552,14 @@ bool write_esp(FILE *image){
 
 	return true;
 }
+//=====================================
+//Add a file path to eh EFI System
+//wnwe file at end of path
+//====================================
+add_path_to_esp(path, image){
+	//TODO:
+	return true;
+}
 
 //=====================================
 //MAIN
@@ -561,6 +570,7 @@ int main(void){
 		fprintf(stderr, "Error: coud not open file %s\n", image_name);
 		return EXIT_FAILURE;
 	}
+	FILE *fp = NULL;
 	//Set sizes & lbas
 	gpt_table_lbas = GPT_TABLE_SIZE / lba_size;
 
@@ -593,8 +603,19 @@ int main(void){
 		fprintf(stderr, "Error: coud not write ESP for file %s\n", image_name);
 		return EXIT_FAILURE;
 	}	
+	
+	//Check if ""BOOTX64.EFI" file exist in currrent directory if so atutomatically add
+	Fp = fopen("BOOTX64.EFI", "rb");
+	if (fp) {
+		fclose(fp);
+		char *path[25]= calloc(1, 25);
+		strcpy (path, "/EFI/BOOT/BOOTIX64.EFI");
+		if (!add_path_to_esp(path,image)){
+			fprintf(stderr, "Error: Could not add file '%s'\n", path);
 
-
+		}	
+	}
+	
 	return EXIT_SUCCESS;
 }
 
